@@ -211,111 +211,114 @@ class Picasso():
 			plt.show()
 
 
+	def fit(self, X, coords, frac=0.8, silent=False, ret_loss=False, summ=False, print_interval=10,
+	        save_ckpt=True, ckpt_name_to_save='ckpt.pth', start_from_ckpt=False, ckpt_name_to_use='ckpt.pth'):
+	    """
+	    Parameters:
+	    X : Input data as numpy array (obs x features)
+	    coords : Shape coordinates (dimension x obs)
+	    frac : Fraction of Shape-Aware cost in loss calculation (default is 0.8)
+	    silent : Print average loss per epoch (default is False)
+	    ret_loss : Boolean to return loss values over epochs
+	    summ : Boolean to return summary of neural network
+	    print_interval : Integer specifying the interval (in epochs) at which to print the epoch number and average loss (default is 10)
+	    save_ckpt : Boolean to save model and optimizer parameters after training (default is True)
+	    ckpt_name_to_save : File name where the checkpoint is saved (default is 'ckpt.pth')
+	    start_from_ckpt : Boolean to start from an existing checkpoint (default is False)
+	    ckpt_name_to_use : Checkpoint file name to use when starting from a checkpoint (default is 'ckpt.pth')
+	    
+	    Returns:
+	    Latent space representation of X
+	    """
+	    
+	    # Determine if GPU is available and use it
+	    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	    
+	    # Create the checkpoints folder if it doesn't exist
+	    os.makedirs('checkpoints', exist_ok=True)
+	    
+	    # Update the checkpoint paths to include the 'checkpoints' directory
+	    ckpt_name_to_save = os.path.join('checkpoints', ckpt_name_to_save)
+	    ckpt_name_to_use = os.path.join('checkpoints', ckpt_name_to_use)
+	    
+	    iters_per_epoch = int(np.ceil(X.shape[0] / self.batch_size))
+	    
+	    # Initialize the model and move it to the device
+	    model = autoencoder(X.shape[1], self.n_hidden, self.n_latent).to(device)
+	    optimizer = torch.optim.Adam(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+	    
+	    # Load from a checkpoint if specified
+	    if start_from_ckpt:
+	        # Ensure the checkpoint file exists
+	        if not os.path.exists(ckpt_name_to_use):
+	            raise FileNotFoundError(f"The checkpoint file '{ckpt_name_to_use}' does not exist.")
+	        
+	        # Load the checkpoint
+	        checkpoint = torch.load(ckpt_name_to_use, map_location=device)
+	        
+	        # Load the parameters of the model and optimizer
+	        model.load_state_dict(checkpoint['model_state_dict'])
+	        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+	    
+	    # Print model summary if requested
+	    if summ:
+	        print("Num Parameters: " + str(sum([param.nelement() for param in model.parameters()])))
+	        summary(model, (self.batch_size, X.shape[1]), self.batch_size)
+	    
+	    # Convert X to a torch tensor and move it to the device
+	    X = torch.from_numpy(X).float().to(device)
+	    
+	    loss_values = []
+	    for e in range(self.epochs):
+	        # Shuffle data
+	        permutation = torch.randperm(X.size()[0])
+	        
+	        model.train()
+	        allLosses = torch.tensor(0, device=device)
+	        
+	        with torch.autograd.set_detect_anomaly(True):
+	            for b in range(iters_per_epoch):
+	                indices = permutation[b * self.batch_size:(b + 1) * self.batch_size]
+	                X_b, coord_b = X[indices], coords  # Ensure 'coords' is also moved to GPU if necessary
+	                
+	                # Set gradients to zero, compute loss, take gradient step
+	                optimizer.zero_grad()
+	                recon_batch, z = model(X_b)
+	                
+	                # Calculate losses
+	                losses = self.lossFunc(recon_batch, X_b, z, coord_b, frac)
+	                
+	                # Backpropagate the final loss
+	                losses[-1].backward()
+	                
+	                allLosses = allLosses + torch.stack(losses, dim=0)
+	                optimizer.step()
+	        
+	        if not silent and e % print_interval == 0:
+	            print('====> Epoch: {} Average loss: {:.4f}'.format(e, allLosses[-1].item() / len(X)))
+	        
+	        loss_values.append([allLosses[i].item() / len(X) for i in range(len(allLosses))])
+	    
+	    # Save a checkpoint (weights of the network and parameters of the optimizer)
+	    if save_ckpt:
+	        torch.save({
+	            'model_state_dict': model.state_dict(),
+	            'optimizer_state_dict': optimizer.state_dict(),
+	        }, ckpt_name_to_save)
+	    
+	    # Set model to evaluation mode
+	    model.eval()
+	    
+	    # Generate latent space representation
+	    recon_batch, z = model(X)
+	    self.model = model
+	    self.Losses = np.array(loss_values)
+	    
+	    if ret_loss:
+	        return np.array(loss_values), z.detach().cpu().numpy()
+	    else:
+	        return z.detach().cpu().numpy()
 
-
-	def fit(self, X, coords, frac = 0.8, silent = False, ret_loss = False, summ = False, print_interval = 10,
-		save_ckpt = True, ckpt_name_to_save ='ckpt.pth', start_from_ckpt = False, ckpt_name_to_use = 'ckpt.pth'):
-		"""
-		Parameters:
-		X : Input data as numpy array (obs x features)
-		coords : Shape coordinates (dimension x obs)
-		frac : Fraction of Shape-Aware cost in loss calculation (default is 0.8)
-		silent : Print average loss per epoch (default is False)
-		ret_loss : Boolean to return loss values over epochs
-		summ : Boolean to return summary of neural network
-		print_interval : Integer specifying the interval (in epochs) at which to print the epoch number and average loss (default is 10)
-		save_ckpt : Boolean to save model and optimizer parameters after training (default is True)
-		ckpt_name_to_save : File name where the checkpoint is saved (default is 'ckpt.pth')
-		start_from_ckpt : Boolean to start from an existing checkpoint (default is False)
-		ckpt_name_to_use : Checkpoint file name to use when starting from a checkpoint (default is 'ckpt.pth')
-		
-		Returns :
-		Latent space representation of X
-		"""
-
-		# Create the checkpoints folder if it doesn't exist
-		os.makedirs('checkpoints', exist_ok=True)
-
-		# Update the checkpoint paths to include the 'checkpoints' directory
-		ckpt_name_to_save = os.path.join('checkpoints', ckpt_name_to_save)
-		ckpt_name_to_use = os.path.join('checkpoints', ckpt_name_to_use)
-		
-			
-		iters_per_epoch = int(np.ceil(X.shape[0] / self.batch_size))
-
-		model = autoencoder(X.shape[1], self.n_hidden, self.n_latent).to(device)
-		optimizer = torch.optim.Adam(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-
-		if start_from_ckpt:
-
-			# Ensure the checkpoint file exists
-			if not os.path.exists(ckpt_name_to_use):
-				raise FileNotFoundError(f"The checkpoint file '{ckpt_name_to_use}' does not exist.")
-		
-			# Load the checkpoint
-			checkpoint = torch.load(ckpt_name_to_use)
-		
-			# Load the parameters of the model and optimizer
-			model.load_state_dict(checkpoint['model_state_dict'])
-			optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-		#Print model summary
-		if summ:
-			print("Num Parameters: "+str(sum([param.nelement() for param in model.parameters()])))
-			summary(model, (self.batch_size,X.shape[1]), self.batch_size)
-
-		X = torch.from_numpy(X).float().to(device)
-	
-		loss_values = []
-		for e in range(self.epochs):
-
-			#Shuffle data
-			permutation = torch.randperm(X.size()[0])
-
-			model.train()
-			allLosses = torch.tensor(0,device=device)
-
-			with torch.autograd.set_detect_anomaly(True):
-				for b in range(iters_per_epoch):
-
-					indices = permutation[b*self.batch_size:(b+1)*self.batch_size]
-					X_b, coord_b = X[indices], coords 
-
-					#Set grad to zero, compute loss, take gradient step
-					optimizer.zero_grad()
-					recon_batch, z = model(X_b)
-
-
-					losses  = self.lossFunc(recon_batch, X_b, z, coord_b, frac) #*****
-
-					
-					losses[-1].backward()
-
-					allLosses = allLosses + torch.stack(losses,dim=0)
-
-					optimizer.step()
-
-			if (silent != True) and (e % print_interval == 0):
-				print('====> Epoch: {} Average loss: {:.4f}'.format(e, allLosses[-1].item() / len(X)))
-
-			loss_values.append([allLosses[i].item() / len(X) for i in range(len(allLosses))])
-
-			
-		# Save a checkpoint (weights of the network and parameters of the optimizer) in the 'checkpoints' folder
-		if save_ckpt:
-			torch.save({'model_state_dict': model.state_dict(),
-				    'optimizer_state_dict': optimizer.state_dict(),},
-				   ckpt_name_to_save)
-
-
-		model.eval()
-		recon_batch, z = model(X)
-		self.model = model
-		self.Losses = np.array(loss_values)
-		if ret_loss:
-			return np.array(loss_values), z.detach().cpu().numpy()
-		else:
-			return z.detach().cpu().numpy()
 
 
 	def trainTest(self,X,coords, trainFrac = 0.8, frac = 0.8, silent = False, print_interval = 10):
